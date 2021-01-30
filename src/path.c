@@ -1,6 +1,8 @@
 #include "linmath_d.h"
 #include "list.h"
 #include "obj_parser.h"
+#include "color.h"
+
 #include <stdio.h>
 #include <assert.h>
 #include <stdlib.h>
@@ -11,17 +13,18 @@
 #include <time.h>
 #include <math.h>
 
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb_image_write.h"
+
 #define TRI_NPTS 3
 #define MAX_LINE_SIZE 256
 #define N_MESHES 8
-#define FOV_RAD (1.5708)
+#define FOV_RAD (1.0472)
 #define MAX_DEPTH 100
 
 #define CAM_X 0
 #define CAM_Y 0
 #define CAM_Z 0
-
-typedef uint8_t color_t[3];
 
 typedef struct Ray
 {
@@ -53,7 +56,7 @@ Ray gen_camera_ray(const unsigned int pixel[2], const Framebuffer *fb);
 bool ray_triangle_intersect(Ray ray, vec3 v0, vec3 v1, vec3 v2, vec3 out_inter_pt);
 bool cast_ray(Ray ray, Mesh meshes[N_MESHES], vec3 out_hit, vec3 out_norm);
 void random_vec_in_hemisphere(vec3 ret, vec3 normal);
-void trace_path(color_t out_color, Ray ray, unsigned int depth, Mesh meshes[N_MESHES]);
+void trace_path(fcolor_t out_color, Ray ray, unsigned int depth, Mesh meshes[N_MESHES]);
 void read_meshes(Mesh out_mesh_arr[N_MESHES], const char *mesh_list_path);
 void free_meshes(Mesh mesh_arr[N_MESHES]);
 
@@ -74,10 +77,17 @@ int main(void)
         {
             const unsigned int pixel[2] = {j, i};
             Ray r = gen_camera_ray(pixel, &f);
-            color_t c;
-            trace_path(c, r, 0, cornell_meshes);
+
+            fcolor_t out_color;
+            trace_path(out_color, r, 0, cornell_meshes);
+
+            color_t c = {out_color[0], out_color[1], out_color[2]};
+
+            memcpy(f.buffer[coord_to_idx(j, i, f.rows, f.cols)], c, sizeof(color_t));
         }
     }
+
+    stbi_write_jpg("./out.jpg",f.cols,f.rows,3,f.buffer,100);
 
     free_meshes(cornell_meshes);
 }
@@ -133,15 +143,9 @@ Ray gen_camera_ray(const unsigned int pixel[2], const Framebuffer *fb)
 {
     const double image_aspect = fb->rows / (double) fb->cols;
 
-    const vec2 pixel_ndc = {
-        (pixel[0] + 0.5) / fb->cols,
-        (pixel[1] + 0.5) / fb->rows
-    };
-
-    // 0,0 is at the center of the screen
     const vec2 pixel_screen = {
-        (2 * pixel_ndc[0]) - 1,
-        1 - (2 * pixel_ndc[1])
+        (pixel[0] + randf(0, 1)) / fb->cols,
+        1 - ((pixel[1] + randf(0, 1)) / fb->rows)
     };
 
     Ray ray;
@@ -266,20 +270,21 @@ void random_vec_in_hemisphere(vec3 ret, vec3 normal)
     vec3_norm(ret, ret);
 }
 
-void trace_path(color_t out_color, Ray ray, unsigned int depth, Mesh meshes[N_MESHES])
+void trace_path(fcolor_t out_color, Ray ray, unsigned int depth, Mesh meshes[N_MESHES])
 {
     if (depth >= MAX_DEPTH)
     {
-        memset(out_color, 0, 3);
+        memset(out_color, 0, sizeof(float) * 3);
         return;
     }
+
 
     vec3 ray_hit_pt;
     vec3 ray_hit_norm;
     bool ray_hit = cast_ray(ray, meshes, ray_hit_pt, ray_hit_norm);
     if (!ray_hit)
     {
-        memset(out_color, 0, 3);
+        memset(out_color, 0, sizeof(float) * 3);
         return;
     }
 
@@ -287,12 +292,20 @@ void trace_path(color_t out_color, Ray ray, unsigned int depth, Mesh meshes[N_ME
     memcpy(new_ray.origin, ray_hit_pt, sizeof(vec3));
     random_vec_in_hemisphere(new_ray.direction, ray_hit_norm);
 
+    fcolor_t color = {255, 255, 255};
     const float p = 1 / (2 * M_PI);
-    float cos_theta = vec3_mul_inner(new_ray.direction, ray_hit_norm);
+    const float cos_theta = vec3_mul_inner(new_ray.direction, ray_hit_norm);
+    const float reflectance = 0.5 / M_PI;
+    const float emittance = (float)(depth % 1000) / 1000;
 
+    fcolor_t incoming;
+    trace_path(incoming, new_ray, depth + 1, meshes);
 
-
-
+    // putting it all together (rendering eqn)
+    fcolor_mul(out_color, incoming, color);
+    fcolor_scale(out_color, reflectance);
+    fcolor_scale(out_color, cos_theta / p);
+    fcolor_offset(out_color, emittance);
 }
 
 void read_meshes(Mesh out_mesh_arr[N_MESHES], const char *mesh_list_path)
