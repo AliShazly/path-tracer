@@ -1,0 +1,8 @@
+/home/ali/projects/c/path/cornellBox/right.obj
+/home/ali/projects/c/path/cornellBox/light.obj
+/home/ali/projects/c/path/cornellBox/left.obj
+/home/ali/projects/c/path/cornellBox/sphere.obj
+/home/ali/projects/c/path/cornellBox/floor.obj
+/home/ali/projects/c/path/cornellBox/ciel.obj
+/home/ali/projects/c/path/cornellBox/cube.obj
+/home/ali/projects/c/path/cornellBox/back.obj
