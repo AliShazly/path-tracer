@@ -6,9 +6,9 @@ SRC     := $(wildcard $(SRC_DIR)/*.c)
 OBJ 	:= $(patsubst $(SRC_DIR)/%.c, $(OBJ_DIR)/%.o, $(SRC))
 
 CC       = clang
-CFLAGS   = -Wall -g -Iinclude
+CFLAGS   = -Wall -g -Iinclude -fopenmp
 OPTFLAGS = -O2
-LDFLAGS  = -lm
+LDFLAGS  = -lm -fopenmp
 LDLIBS   =
 
 .PHONY: all clean opt
