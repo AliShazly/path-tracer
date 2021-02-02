@@ -50,13 +50,3 @@ float fcolor_sum(const fcolor_t c1)
         sum += c1[i];
     return sum;
 }
-
-void fcolor_norm(fcolor_t ret, const fcolor_t c1,
-        const float min, const float max, const float scalar)
-{
-    float delta = max - min;
-    for (int i = 0; i < COL_NCHANNELS; i++)
-    {
-        ret[i] = ((c1[i] - min) / delta) * scalar;
-    }
-}

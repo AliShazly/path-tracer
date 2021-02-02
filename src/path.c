@@ -23,13 +23,15 @@
 #define N_MESHES 8
 #define FOV_RAD (1.0472)
 #define RAY_BUMP_AMT (0.001)
-#define ROWS 256
-#define COLS 256
-#define MAX_DEPTH 64
+#define ROWS 512
+#define COLS 512
+#define MAX_DEPTH 8
 #define N_SAMPLES 500
 #define CAM_X 0
 #define CAM_Y 0
 #define CAM_Z 0
+
+#define CLAMP(val, min, max) (val < min ? min: (val > max ? max : val))
 
 typedef struct Ray
 {
@@ -63,13 +65,13 @@ typedef struct Framebuffer
 
 void print_progress(char* msg, int len, float current, float max);
 void print_col(fcolor_t c);
-int clamp(int val, int min, int max);
 void uniform_sample(vec2 out_offset, int n_samples, int sample_iter);
 int coord_to_idx(int x, int y, int rows, int cols);
 double frand(double low,double high);
 double distance(vec3 a, vec3 b);
 void triangle_normal(vec3 dst, vec3 a, vec3 b, vec3 c);
 bool point_in_circle(vec2 pt, vec2 center, int radius);
+void reinhard_cmap(fcolor_t ret, fcolor_t c);
 Ray gen_camera_ray(vec2 pixel, const Framebuffer *fb);
 void cosine_sample_hemisphere(vec3 ret, vec3 normal);
 bool ray_triangle_intersect(Ray ray, vec3 v0, vec3 v1, vec3 v2, vec3 out_inter_pt);
@@ -84,7 +86,7 @@ int main(void)
     Mesh *cornell_meshes = malloc(sizeof(Mesh) * N_MESHES);
     read_meshes(cornell_meshes, "./objs.txt");
 
-    const fcolor_t p_white = {1.0f, 1.0f, 1.0f};
+    const fcolor_t lgt_color = {1.0f, 0.83f, 0.66f};
     const fcolor_t white   = {0.7f, 0.7f, 0.7f};
     const fcolor_t green   = {0, 1.0f, 0};
     const fcolor_t red     = {1.0f, 0, 0};
@@ -97,7 +99,7 @@ int main(void)
     Material floor_mat = {.emittance = 0, .reflectance = r, .name = "Floor"};
     Material obj1_mat  = {.emittance = 0, .reflectance = r, .name = "FirstObject"};
     Material obj2_mat  = {.emittance = 0, .reflectance = r, .name = "SecondObject"};
-    Material light_mat = {.emittance = 9001, .reflectance = 0, .name = "Light"};
+    Material light_mat = {.emittance = 100, .reflectance = 0, .name = "Light"};
 
     memcpy(right_mat.color, red, sizeof(fcolor_t));
     memcpy(left_mat.color, green, sizeof(fcolor_t));
@@ -106,7 +108,7 @@ int main(void)
     memcpy(floor_mat.color, white, sizeof(fcolor_t));
     memcpy(obj1_mat.color, white, sizeof(fcolor_t));
     memcpy(obj2_mat.color, white, sizeof(fcolor_t));
-    memcpy(light_mat.color, p_white, sizeof(fcolor_t));
+    memcpy(light_mat.color, lgt_color, sizeof(fcolor_t));
 
     // ordering is determined in ./objs.txt
     cornell_meshes[0].material = right_mat;
@@ -153,9 +155,12 @@ int main(void)
                 fcolor_add(color_avg, color_avg, out_color);
             }
             fcolor_scale_inv(color_avg, color_avg, N_SAMPLES);
+
             for (int i = 0; i < COL_NCHANNELS; i++)
             {
-                color_avg[i]= clamp(color_avg[i], 0, 255);
+                // gamma correcting
+                // sqrt is an approx of pow(x, (1 / 2.2))
+                color_avg[i] = sqrt(CLAMP((color_avg[i]), 0., 1.)) * 255;
             }
 
             memcpy(fb.buffer[coord_to_idx(j, i, fb.rows, fb.cols)], color_avg, sizeof(fcolor_t));
@@ -209,15 +214,6 @@ void print_col(fcolor_t c)
     printf("%f, %f, %f\n", c[0], c[1], c[2]);
 }
 
-int clamp(int val, int min, int max)
-{
-    if (val > max)
-        return max;
-    else if (val < min)
-        return min;
-    return val;
-}
-
 void uniform_sample(vec2 out_offset, int n_samples, int sample_iter)
 {
     const double step = 1. / n_samples;
@@ -257,6 +253,13 @@ bool point_in_circle(vec2 pt, vec2 center, int radius)
 {
     // no need for a square root, square the radius for comparison instead
     return (pow((center[0] - pt[0]), 2) + pow((center[1] - pt[1]), 2)) < pow(radius, 2);
+}
+
+void reinhard_cmap(fcolor_t ret, fcolor_t c)
+{
+    fcolor_t t;
+    fcolor_offset(t, c, 1);
+    fcolor_divide(ret, c, t);
 }
 
 // switch rows/cols for a fb index as a pixel, and you're in raster space
@@ -449,6 +452,7 @@ void trace_path(fcolor_t out_color, Ray ray, unsigned int depth, Mesh meshes[N_M
     trace_path(incoming, new_ray, depth + 1, meshes);
 
     // https://i.redd.it/802mndge03t01.png
+    // https://computergraphics.stackexchange.com/questions/8578/how-to-set-equivalent-pdfs-for-cosine-weighted-and-uniform-sampled-hemispheres
     // to get light towards eye
     // a = light emitted from pt (material emit)
     // b = all the light coming into the point from the unit hemisphere samples (the recursive output)
@@ -456,20 +460,17 @@ void trace_path(fcolor_t out_color, Ray ray, unsigned int depth, Mesh meshes[N_M
     // d = irradiance factor over the normal at the point (ray_normal_dot)
     // ((a + b) * c) * d
 
-    const float pdf = 1 / (2 * M_PI);
     const float emitted_light = ray_hit_mat->emittance;
     const float ray_normal_dot = vec3_mul_inner(new_ray.direction, ray_hit_norm);
     const fcolor_t *surf_col = &(ray_hit_mat->color);
+    // uniform pdf = 1 / (2 * M_PI)
+    const float pdf = ray_normal_dot / M_PI;
 
     const float precomp = ((ray_hit_mat->reflectance / M_PI) * ray_normal_dot) / pdf;
-    const float col_r = emitted_light + (((incoming[0]) * (*surf_col)[0]) * precomp);
-    const float col_g = emitted_light + (((incoming[1]) * (*surf_col)[1]) * precomp);
-    const float col_b = emitted_light + (((incoming[2]) * (*surf_col)[2]) * precomp);
-
-    out_color[0] = col_r;
-    out_color[1] = col_g;
-    out_color[2] = col_b;
+    for (int i = 0; i < COL_NCHANNELS; i++)
+        out_color[i] = ((*surf_col)[i] * emitted_light) + (incoming[i] * (*surf_col)[i]) * precomp;
 }
+
 
 void read_meshes(Mesh out_mesh_arr[N_MESHES], const char *mesh_list_path)
 {

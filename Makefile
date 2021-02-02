@@ -7,7 +7,7 @@ OBJ 	:= $(patsubst $(SRC_DIR)/%.c, $(OBJ_DIR)/%.o, $(SRC))
 
 CC       = clang
 CFLAGS   = -Wall -g -Iinclude -fopenmp
-OPTFLAGS = -O2
+OPTFLAGS = -O3
 LDFLAGS  = -lm -fopenmp
 LDLIBS   =
 

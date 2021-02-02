@@ -5,6 +5,8 @@
 
 #define COL_NCHANNELS 3
 
+#define COL_LUMINANCE(c)((c[0] * 0.2126f) + (c[1] * 0.7152f) + (c[2] * 0.0722))
+
 typedef float fcolor_t[COL_NCHANNELS];
 typedef uint8_t color_t[COL_NCHANNELS];
 
@@ -16,7 +18,5 @@ void fcolor_sub(fcolor_t ret, const fcolor_t c1, const fcolor_t c2);
 void fcolor_mul(fcolor_t ret, const fcolor_t c1, const fcolor_t c2);
 void fcolor_divide(fcolor_t ret, const fcolor_t c1, const fcolor_t c2);
 float fcolor_sum(const fcolor_t c1);
-void fcolor_norm(fcolor_t ret, const fcolor_t c1,
-        const float min, const float max, const float scalar);
 
 #endif
