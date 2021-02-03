@@ -1,10 +1,14 @@
 #include "color.h"
 #include <stdint.h>
+#include <float.h>
 
 void fcolor_scale(fcolor_t ret, const fcolor_t color, const double scalar)
 {
     for (int i = 0; i < COL_NCHANNELS; i++)
-        ret[i] = color[i] * scalar;
+    {
+        const float s = color[i] * scalar;
+        ret[i] = (s > FLT_MAX) ? FLT_MAX : s;
+    }
 }
 
 void fcolor_scale_inv(fcolor_t ret, const fcolor_t color, const double scalar)
@@ -16,13 +20,19 @@ void fcolor_scale_inv(fcolor_t ret, const fcolor_t color, const double scalar)
 void fcolor_offset(fcolor_t ret, const fcolor_t color, const double offset)
 {
     for (int i = 0; i < COL_NCHANNELS; i++)
-        ret[i] = color[i] + offset;
+    {
+        const float s = color[i] + offset;
+        ret[i] = (s > FLT_MAX) ? FLT_MAX : s;
+    }
 }
 
 void fcolor_add(fcolor_t ret, const fcolor_t c1, const fcolor_t c2)
 {
     for (int i = 0; i < COL_NCHANNELS; i++)
-        ret[i] = c1[i] + c2[i];
+    {
+        const float s = c1[i] + c2[i];
+        ret[i] = (s > FLT_MAX) ? FLT_MAX : s;
+    }
 }
 
 void fcolor_sub(fcolor_t ret, const fcolor_t c1, const fcolor_t c2)
@@ -34,7 +44,10 @@ void fcolor_sub(fcolor_t ret, const fcolor_t c1, const fcolor_t c2)
 void fcolor_mul(fcolor_t ret, const fcolor_t c1, const fcolor_t c2)
 {
     for (int i = 0; i < COL_NCHANNELS; i++)
-        ret[i] = c1[i] * c2[i];
+    {
+        const float s = c1[i] * c2[i];
+        ret[i] = (s > FLT_MAX) ? FLT_MAX : s;
+    }
 }
 
 void fcolor_divide(fcolor_t ret, const fcolor_t c1, const fcolor_t c2)

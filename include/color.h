@@ -5,7 +5,7 @@
 
 #define COL_NCHANNELS 3
 
-#define COL_LUMINANCE(c)((c[0] * 0.2126f) + (c[1] * 0.7152f) + (c[2] * 0.0722))
+#define COL_LUMINANCE(c)((c[0] * 0.2126f) + (c[1] * 0.7152f) + (c[2] * 0.0722f))
 
 typedef float fcolor_t[COL_NCHANNELS];
 typedef uint8_t color_t[COL_NCHANNELS];
