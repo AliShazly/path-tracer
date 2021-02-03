@@ -13,6 +13,8 @@
 #include <time.h>
 #include <math.h>
 #include <unistd.h>
+#include <wait.h>
+#include <fcntl.h>
 #include <omp.h>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -23,15 +25,15 @@
 #define N_MESHES 8
 #define FOV_RAD (1.0472)
 #define RAY_BUMP_AMT (0.001)
-#define ROWS 512
-#define COLS 512
-#define MAX_DEPTH 8
-#define N_SAMPLES 500
+#define ROWS 256
+#define COLS 256
+#define MAX_DEPTH 16
+#define N_SAMPLES 2000
 #define CAM_X 0
 #define CAM_Y 0
 #define CAM_Z 0
 
-#define CLAMP(val, min, max) (val < min ? min: (val > max ? max : val))
+#define CLAMP(val, min, max) (val < min ? min : (val > max ? max : val))
 
 typedef struct Ray
 {
@@ -43,7 +45,6 @@ typedef struct Ray
 typedef struct Material
 {
     fcolor_t color;
-    float reflectance;
     float emittance;
     char *name;
 }Material;
@@ -65,10 +66,11 @@ typedef struct Framebuffer
 
 void print_progress(char* msg, int len, float current, float max);
 void print_col(fcolor_t c);
-void uniform_sample(vec2 out_offset, int n_samples, int sample_iter);
 int coord_to_idx(int x, int y, int rows, int cols);
+bool almost_equal(double a, double b, double eps);
 double frand(double low,double high);
 double distance(vec3 a, vec3 b);
+void uniform_sample(vec2 out_offset, int n_samples, int sample_iter);
 void triangle_normal(vec3 dst, vec3 a, vec3 b, vec3 c);
 bool point_in_circle(vec2 pt, vec2 center, int radius);
 void reinhard_cmap(fcolor_t ret, fcolor_t c);
@@ -82,7 +84,7 @@ void free_meshes(Mesh mesh_arr[N_MESHES]);
 
 int main(void)
 {
-    srand(time(NULL));
+    srandom(time(NULL));
     Mesh *cornell_meshes = malloc(sizeof(Mesh) * N_MESHES);
     read_meshes(cornell_meshes, "./objs.txt");
 
@@ -91,15 +93,14 @@ int main(void)
     const fcolor_t green   = {0, 1.0f, 0};
     const fcolor_t red     = {1.0f, 0, 0};
 
-    const float r = 0.5;
-    Material right_mat = {.emittance = 0, .reflectance = r, .name = "RightWall"};
-    Material left_mat  = {.emittance = 0, .reflectance = r, .name = "LeftWall"};
-    Material back_mat  = {.emittance = 0, .reflectance = r, .name = "BackWall"};
-    Material top_mat   = {.emittance = 0, .reflectance = r, .name = "Cieling"};
-    Material floor_mat = {.emittance = 0, .reflectance = r, .name = "Floor"};
-    Material obj1_mat  = {.emittance = 0, .reflectance = r, .name = "FirstObject"};
-    Material obj2_mat  = {.emittance = 0, .reflectance = r, .name = "SecondObject"};
-    Material light_mat = {.emittance = 100, .reflectance = 0, .name = "Light"};
+    Material right_mat = {.emittance =  0, .name = "RightWall"};
+    Material left_mat  = {.emittance =  0, .name = "LeftWall"};
+    Material back_mat  = {.emittance =  0, .name = "BackWall"};
+    Material top_mat   = {.emittance =  0, .name = "Cieling"};
+    Material floor_mat = {.emittance =  0, .name = "Floor"};
+    Material obj1_mat  = {.emittance =  0, .name = "FirstObject"};
+    Material obj2_mat  = {.emittance =  0, .name = "SecondObject"};
+    Material light_mat = {.emittance = 50, .name = "Light"};
 
     memcpy(right_mat.color, red, sizeof(fcolor_t));
     memcpy(left_mat.color, green, sizeof(fcolor_t));
@@ -124,7 +125,7 @@ int main(void)
     fb.rows = ROWS;
     fb.cols = COLS;
     const int fb_size = fb.rows * fb.cols;
-    fb.buffer = malloc(sizeof(fcolor_t) * fb_size);
+    fb.buffer = calloc(fb_size, sizeof(fcolor_t));
 
     omp_lock_t writelock;
     omp_init_lock(&writelock);
@@ -154,16 +155,17 @@ int main(void)
 
                 fcolor_add(color_avg, color_avg, out_color);
             }
+
             fcolor_scale_inv(color_avg, color_avg, N_SAMPLES);
 
             for (int i = 0; i < COL_NCHANNELS; i++)
             {
-                // gamma correcting
-                // sqrt is an approx of pow(x, (1 / 2.2))
-                color_avg[i] = sqrt(CLAMP((color_avg[i]), 0., 1.)) * 255;
+                // sqrt is an approx of pow(x, (1 / 2.2)) for gamma correcting
+                color_avg[i] = CLAMP(sqrt(color_avg[i]), 0.f, 1.f) * 255;
             }
 
-            memcpy(fb.buffer[coord_to_idx(j, i, fb.rows, fb.cols)], color_avg, sizeof(fcolor_t));
+            const int buf_idx = coord_to_idx(j, i, fb.rows, fb.cols);
+            memcpy(fb.buffer[buf_idx], color_avg, sizeof(fcolor_t));
 
             omp_set_lock(&writelock);
             print_progress("Rendering... ", 50, loop_count++, fb_size);
@@ -183,7 +185,14 @@ int main(void)
             write_buf[i][j] = (uint8_t)(fb.buffer[i][j]);
         }
     }
-    stbi_write_jpg("./out.jpg",fb.cols,fb.rows,COL_NCHANNELS,write_buf,100);
+
+    if (fork() == 0)
+        execl("/bin/cp", "cp", "./out.png", "./out_bak.png", (char*)0);
+    else
+        wait(NULL);
+
+    const int png_stride = fb.cols * sizeof(write_buf[0]);
+    stbi_write_jpg("./out.png",fb.cols,fb.rows,COL_NCHANNELS,write_buf, png_stride);
 
     free_meshes(cornell_meshes);
     free(fb.buffer);
@@ -214,13 +223,6 @@ void print_col(fcolor_t c)
     printf("%f, %f, %f\n", c[0], c[1], c[2]);
 }
 
-void uniform_sample(vec2 out_offset, int n_samples, int sample_iter)
-{
-    const double step = 1. / n_samples;
-    out_offset[0] = step * ((sample_iter % n_samples) + 1);
-    out_offset[1] = step * (floor(sample_iter /(double) n_samples) + 1);
-}
-
 int coord_to_idx(int x, int y, int rows, int cols)
 {
     // flipping vertically
@@ -229,14 +231,26 @@ int coord_to_idx(int x, int y, int rows, int cols)
     return row * cols + x;
 }
 
+bool almost_equal(double a, double b, double eps)
+{
+    return fabs(a-b) < eps;
+}
+
 double frand(double low,double high)
 {
-    return (rand()/(double)(RAND_MAX))*fabs(low-high)+low;
+    return (random()/(double)(RAND_MAX))*fabs(low-high)+low;
 }
 
 double distance(vec3 a, vec3 b)
 {
     return sqrt(pow(b[0] - a[0], 2) + pow(b[1] - a[1], 2) + pow(b[2] - a[2], 2));
+}
+
+void uniform_sample(vec2 out_offset, int n_samples, int sample_iter)
+{
+    const double step = 1. / n_samples;
+    out_offset[0] = step * ((sample_iter % n_samples) + 1);
+    out_offset[1] = step * (floor(sample_iter /(double) n_samples) + 1);
 }
 
 void triangle_normal(vec3 dst, vec3 a, vec3 b, vec3 c)
@@ -456,19 +470,25 @@ void trace_path(fcolor_t out_color, Ray ray, unsigned int depth, Mesh meshes[N_M
     // to get light towards eye
     // a = light emitted from pt (material emit)
     // b = all the light coming into the point from the unit hemisphere samples (the recursive output)
-    // c = BRDF - chances of such light rays bouncing towards the eye
+    // c = BRDF - chances of such light rays bouncing towards the eye (color / pi)
     // d = irradiance factor over the normal at the point (ray_normal_dot)
     // ((a + b) * c) * d
 
-    const float emitted_light = ray_hit_mat->emittance;
-    const float ray_normal_dot = vec3_mul_inner(new_ray.direction, ray_hit_norm);
+    const double emitted_light = ray_hit_mat->emittance;
+    const double ray_normal_dot = vec3_mul_inner(new_ray.direction, ray_hit_norm);
     const fcolor_t *surf_col = &(ray_hit_mat->color);
-    // uniform pdf = 1 / (2 * M_PI)
-    const float pdf = ray_normal_dot / M_PI;
+    const double pdf = almost_equal(ray_normal_dot, 0.f, FLT_EPSILON) ? 1 : ray_normal_dot / M_PI;
 
-    const float precomp = ((ray_hit_mat->reflectance / M_PI) * ray_normal_dot) / pdf;
     for (int i = 0; i < COL_NCHANNELS; i++)
-        out_color[i] = ((*surf_col)[i] * emitted_light) + (incoming[i] * (*surf_col)[i]) * precomp;
+    {
+        const double color = ((*surf_col)[i] / M_PI) * ray_normal_dot;
+        const double emit = color * emitted_light;
+        const double inc =  color * incoming[i];
+
+        /* printf("color=%f emit=%f inc=%f rnd=%f pdf=%f",color,emit,inc,ray_normal_dot,pdf); */
+        out_color[i] = emit + inc / pdf;
+    }
+
 }
 
 
