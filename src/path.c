@@ -25,10 +25,10 @@
 #define N_MESHES 8
 #define FOV_RAD (1.0472)
 #define RAY_BUMP_AMT (0.001)
-#define ROWS 256
-#define COLS 256
-#define MAX_DEPTH 16
-#define N_SAMPLES 2000
+#define ROWS 128
+#define COLS 128
+#define MAX_DEPTH 12
+#define N_SAMPLES 100
 #define CAM_X 0
 #define CAM_Y 0
 #define CAM_Z 0
@@ -70,15 +70,16 @@ int coord_to_idx(int x, int y, int rows, int cols);
 bool almost_equal(double a, double b, double eps);
 double frand(double low,double high);
 double distance(vec3 a, vec3 b);
+double square_dist(vec3 a, vec3 b);
 void uniform_sample(vec2 out_offset, int n_samples, int sample_iter);
 void triangle_normal(vec3 dst, vec3 a, vec3 b, vec3 c);
 bool point_in_circle(vec2 pt, vec2 center, int radius);
 void reinhard_cmap(fcolor_t ret, fcolor_t c);
-Ray gen_camera_ray(vec2 pixel, const Framebuffer *fb);
+void gen_camera_ray(Ray *ret, vec2 pixel, const Framebuffer *fb);
 void cosine_sample_hemisphere(vec3 ret, vec3 normal);
-bool ray_triangle_intersect(Ray ray, vec3 v0, vec3 v1, vec3 v2, vec3 out_inter_pt);
-bool cast_ray(Ray ray, Mesh meshes[N_MESHES], vec3 out_hit, vec3 out_norm, Material **out_hit_mat);
-void trace_path(fcolor_t out_color, Ray ray, unsigned int depth, Mesh meshes[N_MESHES]);
+bool ray_triangle_intersect(Ray *ray, vec3 v0, vec3 v1, vec3 v2, vec3 out_inter_pt);
+bool cast_ray(Ray *ray, Mesh meshes[N_MESHES], vec3 out_hit, vec3 out_norm, Material **out_hit_mat);
+void trace_path(fcolor_t out_color, Ray *ray, unsigned int depth, Mesh meshes[N_MESHES]);
 void read_meshes(Mesh out_mesh_arr[N_MESHES], const char *mesh_list_path);
 void free_meshes(Mesh mesh_arr[N_MESHES]);
 
@@ -100,7 +101,7 @@ int main(void)
     Material floor_mat = {.emittance =  0, .name = "Floor"};
     Material obj1_mat  = {.emittance =  0, .name = "FirstObject"};
     Material obj2_mat  = {.emittance =  0, .name = "SecondObject"};
-    Material light_mat = {.emittance = 50, .name = "Light"};
+    Material light_mat = {.emittance = 100, .name = "Light"};
 
     memcpy(right_mat.color, red, sizeof(fcolor_t));
     memcpy(left_mat.color, green, sizeof(fcolor_t));
@@ -150,8 +151,9 @@ int main(void)
                 pixel[0] += pix_sample_offset[0];
                 pixel[1] += pix_sample_offset[1];
 
-                Ray ray = gen_camera_ray(pixel, &fb);
-                trace_path(out_color, ray, 0, cornell_meshes);
+                Ray ray;
+                gen_camera_ray(&ray, pixel, &fb);
+                trace_path(out_color, &ray, 0, cornell_meshes);
 
                 fcolor_add(color_avg, color_avg, out_color);
             }
@@ -246,6 +248,11 @@ double distance(vec3 a, vec3 b)
     return sqrt(pow(b[0] - a[0], 2) + pow(b[1] - a[1], 2) + pow(b[2] - a[2], 2));
 }
 
+double square_dist(vec3 a, vec3 b)
+{
+    return pow(b[0] - a[0], 2) + pow(b[1] - a[1], 2) + pow(b[2] - a[2], 2);
+}
+
 void uniform_sample(vec2 out_offset, int n_samples, int sample_iter)
 {
     const double step = 1. / n_samples;
@@ -277,27 +284,24 @@ void reinhard_cmap(fcolor_t ret, fcolor_t c)
 }
 
 // switch rows/cols for a fb index as a pixel, and you're in raster space
-Ray gen_camera_ray(vec2 pixel, const Framebuffer *fb)
+void gen_camera_ray(Ray *ret, vec2 pixel, const Framebuffer *fb)
 {
     const double image_aspect = fb->rows / (double) fb->cols;
+    /* const double image_aspect = 1; */
 
     const vec2 pixel_screen = {
         pixel[0] / fb->cols,
         1 - (pixel[1] / fb->rows)
     };
 
-    Ray ray;
-    ray.origin[0] = CAM_X;
-    ray.origin[1] = CAM_Y;
-    ray.origin[2] = CAM_Z;
-
-    double t = tan(FOV_RAD / 2);
-    ray.direction[0] = (2 * pixel_screen[0] - 1) * image_aspect * t;
-    ray.direction[1] = (1 - 2 * pixel_screen[1]) * t;
-    ray.direction[2] = -1;
-
-    vec3_norm(ray.direction, ray.direction);
-    return ray;
+    const double t = tan(FOV_RAD / 2);
+    ret->origin[0] = CAM_X;
+    ret->origin[1] = CAM_Y;
+    ret->origin[2] = CAM_Z;
+    ret->direction[0] = (2 * pixel_screen[0] - 1) * t;
+    ret->direction[1] = (1 - 2 * pixel_screen[1]) * image_aspect * t;
+    ret->direction[2] = -1;
+    vec3_norm(ret->direction, ret->direction);
 }
 
 // http://www.kevinbeason.com/smallpt/
@@ -338,23 +342,23 @@ void cosine_sample_hemisphere(vec3 ret, vec3 normal)
 
 // https://en.wikipedia.org/wiki/M%C3%B6ller%E2%80%93Trumbore_intersection_algorithm
 // shamelessly copied, i'll understand it soon
-bool ray_triangle_intersect(Ray ray, vec3 v0, vec3 v1, vec3 v2, vec3 out_inter_pt)
+bool ray_triangle_intersect(Ray *ray, vec3 v0, vec3 v1, vec3 v2, vec3 out_inter_pt)
 {
     vec3 edge1, edge2, h, s, q;
     double a,f,u,v;
     vec3_sub(edge1, v1, v0);
     vec3_sub(edge2, v2, v0);
-    vec3_mul_cross(h, ray.direction, edge2);
+    vec3_mul_cross(h, ray->direction, edge2);
     a = vec3_mul_inner(edge1, h);
     if (a > -DBL_EPSILON && a < DBL_EPSILON)
         return false;    // This ray is parallel to this triangle.
     f = 1.0/a;
-    vec3_sub(s, ray.origin, v0);
+    vec3_sub(s, ray->origin, v0);
     u = f * vec3_mul_inner(s, h);
     if (u < 0.0 || u > 1.0)
         return false;
     vec3_mul_cross(q, s, edge1);
-    v = f * vec3_mul_inner(ray.direction, q);
+    v = f * vec3_mul_inner(ray->direction, q);
     if (v < 0.0 || u + v > 1.0)
         return false;
     // At this stage we can compute t to find out where the intersection point is on the line.
@@ -362,15 +366,15 @@ bool ray_triangle_intersect(Ray ray, vec3 v0, vec3 v1, vec3 v2, vec3 out_inter_p
     if (t > DBL_EPSILON) // ray intersection
     {
         vec3 ss;
-        vec3_scale(ss, ray.direction, t);
-        vec3_add(out_inter_pt, ray.origin, ss);
+        vec3_scale(ss, ray->direction, t);
+        vec3_add(out_inter_pt, ray->origin, ss);
         return true;
     }
     else // This means that there is a line intersection but not a ray intersection.
         return false;
 }
 
-bool cast_ray(Ray ray, Mesh meshes[N_MESHES], vec3 out_hit, vec3 out_norm, Material **out_hit_mat)
+bool cast_ray(Ray *ray, Mesh meshes[N_MESHES], vec3 out_hit, vec3 out_norm, Material **out_hit_mat)
 {
     list inter_pts;
     list_init(&inter_pts, sizeof(vec3), 10);
@@ -410,7 +414,7 @@ bool cast_ray(Ray ray, Mesh meshes[N_MESHES], vec3 out_hit, vec3 out_norm, Mater
     for (int i = 0; i < inter_pts.used; i++)
     {
         vec3 *inter_pt = list_index(&inter_pts, i);
-        double dist = distance(ray.origin, *inter_pt);
+        double dist = square_dist(ray->origin, *inter_pt);
         if (dist < closest_dist)
         {
             closest_dist = dist;
@@ -444,7 +448,7 @@ bool cast_ray(Ray ray, Mesh meshes[N_MESHES], vec3 out_hit, vec3 out_norm, Mater
     return true;
 }
 
-void trace_path(fcolor_t out_color, Ray ray, unsigned int depth, Mesh meshes[N_MESHES])
+void trace_path(fcolor_t out_color, Ray *ray, unsigned int depth, Mesh meshes[N_MESHES])
 {
     memset(out_color, 0, sizeof(fcolor_t));
 
@@ -463,7 +467,7 @@ void trace_path(fcolor_t out_color, Ray ray, unsigned int depth, Mesh meshes[N_M
     cosine_sample_hemisphere(new_ray.direction, ray_hit_norm);
 
     fcolor_t incoming;
-    trace_path(incoming, new_ray, depth + 1, meshes);
+    trace_path(incoming, &new_ray, depth + 1, meshes);
 
     // https://i.redd.it/802mndge03t01.png
     // https://computergraphics.stackexchange.com/questions/8578/how-to-set-equivalent-pdfs-for-cosine-weighted-and-uniform-sampled-hemispheres
@@ -485,10 +489,8 @@ void trace_path(fcolor_t out_color, Ray ray, unsigned int depth, Mesh meshes[N_M
         const double emit = color * emitted_light;
         const double inc =  color * incoming[i];
 
-        /* printf("color=%f emit=%f inc=%f rnd=%f pdf=%f",color,emit,inc,ray_normal_dot,pdf); */
         out_color[i] = emit + inc / pdf;
     }
-
 }
 
 
