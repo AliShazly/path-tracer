@@ -1,5 +1,4 @@
 #include "linmath_d.h"
-#include "list.h"
 #include "obj_parser.h"
 #include "color.h"
 
@@ -35,21 +34,20 @@
 
 #define CLAMP(val, min, max) (val < min ? min : (val > max ? max : val))
 
-typedef struct Ray
+typedef struct
 {
     vec3 origin;
     vec3 direction;
 }Ray;
 
 // assuming lambertian
-typedef struct Material
+typedef struct
 {
     fcolor_t color;
     float emittance;
-    char *name;
 }Material;
 
-typedef struct Mesh
+typedef struct
 {
     vec3 *verts;
     vec3 *normals;
@@ -57,7 +55,22 @@ typedef struct Mesh
     Material material;
 }Mesh;
 
-typedef struct Framebuffer
+typedef struct
+{
+    double radius;
+    vec3 center;
+    Material material;
+}Sphere;
+
+typedef struct
+{
+    size_t n_meshes;
+    size_t n_spheres;
+    Mesh *mesh_arr;
+    Sphere *sphere_arr;
+}Scene;
+
+typedef struct
 {
     size_t rows;
     size_t cols;
@@ -78,14 +91,14 @@ void reinhard_cmap(fcolor_t ret, fcolor_t c);
 void gen_camera_ray(Ray *ret, vec2 pixel, const Framebuffer *fb);
 void cosine_sample_hemisphere(vec3 ret, vec3 normal);
 bool ray_triangle_intersect(Ray *ray, vec3 v0, vec3 v1, vec3 v2, vec3 out_inter_pt);
-bool cast_ray(Ray *ray, Mesh meshes[N_MESHES], vec3 out_hit, vec3 out_norm, Material **out_hit_mat);
-void trace_path(fcolor_t out_color, Ray *ray, unsigned int depth, Mesh meshes[N_MESHES]);
+bool ray_sphere_intersect(Ray *ray, Sphere *sphere, vec3 out_inter, vec3 out_norm);
+bool cast_ray(Ray *ray, Scene *scene, vec3 out_hit, vec3 out_norm, Material **out_hit_mat);
+void trace_path(fcolor_t out_color, Ray *ray, unsigned int depth, Scene *scene);
 void read_meshes(Mesh out_mesh_arr[N_MESHES], const char *mesh_list_path);
 void free_meshes(Mesh mesh_arr[N_MESHES]);
 
 int main(void)
 {
-    srandom(time(NULL));
     Mesh *cornell_meshes = malloc(sizeof(Mesh) * N_MESHES);
     read_meshes(cornell_meshes, "./objs.txt");
 
@@ -94,33 +107,34 @@ int main(void)
     const fcolor_t green   = {0, 1.0f, 0};
     const fcolor_t red     = {1.0f, 0, 0};
 
-    Material right_mat = {.emittance =  0, .name = "RightWall"};
-    Material left_mat  = {.emittance =  0, .name = "LeftWall"};
-    Material back_mat  = {.emittance =  0, .name = "BackWall"};
-    Material top_mat   = {.emittance =  0, .name = "Cieling"};
-    Material floor_mat = {.emittance =  0, .name = "Floor"};
-    Material obj1_mat  = {.emittance =  0, .name = "FirstObject"};
-    Material obj2_mat  = {.emittance =  0, .name = "SecondObject"};
-    Material light_mat = {.emittance = 100, .name = "Light"};
-
-    memcpy(right_mat.color, red, sizeof(fcolor_t));
-    memcpy(left_mat.color, green, sizeof(fcolor_t));
-    memcpy(back_mat.color, white, sizeof(fcolor_t));
-    memcpy(top_mat.color, white, sizeof(fcolor_t));
-    memcpy(floor_mat.color, white, sizeof(fcolor_t));
-    memcpy(obj1_mat.color, white, sizeof(fcolor_t));
-    memcpy(obj2_mat.color, white, sizeof(fcolor_t));
+    Material white_mat = {.emittance = 0};
+    Material green_mat  = {.emittance = 0};
+    Material red_mat  = {.emittance = 0};
+    Material light_mat = {.emittance = 100};
+    Material less_light_mat = {.emittance = 10};
+    memcpy(red_mat.color, red, sizeof(fcolor_t));
+    memcpy(green_mat.color, green, sizeof(fcolor_t));
+    memcpy(white_mat.color, white, sizeof(fcolor_t));
     memcpy(light_mat.color, lgt_color, sizeof(fcolor_t));
+    memcpy(less_light_mat.color, lgt_color, sizeof(fcolor_t));
 
     // ordering is determined in ./objs.txt
-    cornell_meshes[0].material = right_mat;
+    cornell_meshes[0].material = red_mat;
     cornell_meshes[1].material = light_mat;
-    cornell_meshes[2].material = left_mat;
-    cornell_meshes[3].material = obj1_mat;
-    cornell_meshes[4].material = floor_mat;
-    cornell_meshes[5].material = top_mat;
-    cornell_meshes[6].material = obj2_mat;
-    cornell_meshes[7].material = back_mat;
+    cornell_meshes[2].material = green_mat;
+    cornell_meshes[3].material = white_mat;
+    cornell_meshes[4].material = white_mat;
+    cornell_meshes[5].material = white_mat;
+    cornell_meshes[6].material = white_mat;
+    cornell_meshes[7].material = white_mat;
+
+    const int n_spheres = 1;
+    Sphere sphere_arr[n_spheres] = {
+        {.center = {0,0,-0.72}, .radius = 0.08, .material=less_light_mat}
+    };
+
+    Scene scene = {.n_meshes = N_MESHES, .mesh_arr = cornell_meshes,
+        .n_spheres = n_spheres, .sphere_arr=sphere_arr};
 
     Framebuffer fb;
     fb.rows = ROWS;
@@ -132,6 +146,7 @@ int main(void)
     omp_init_lock(&writelock);
 
     time_t begin = time(NULL);
+    srandom(time(NULL));
 
     int loop_count = 0;
     #pragma omp parallel for schedule(dynamic)
@@ -153,7 +168,7 @@ int main(void)
 
                 Ray ray;
                 gen_camera_ray(&ray, pixel, &fb);
-                trace_path(out_color, &ray, 0, cornell_meshes);
+                trace_path(out_color, &ray, 0, &scene);
 
                 fcolor_add(color_avg, color_avg, out_color);
             }
@@ -163,7 +178,7 @@ int main(void)
             for (int i = 0; i < COL_NCHANNELS; i++)
             {
                 // sqrt is an approx of pow(x, (1 / 2.2)) for gamma correcting
-                color_avg[i] = CLAMP(sqrt(color_avg[i]), 0.f, 1.f) * 255;
+                color_avg[i] = CLAMP(pow(color_avg[i], 1/2.2), 0.f, 1.f) * 255;
             }
 
             const int buf_idx = coord_to_idx(j, i, fb.rows, fb.cols);
@@ -287,7 +302,6 @@ void reinhard_cmap(fcolor_t ret, fcolor_t c)
 void gen_camera_ray(Ray *ret, vec2 pixel, const Framebuffer *fb)
 {
     const double image_aspect = fb->rows / (double) fb->cols;
-    /* const double image_aspect = 1; */
 
     const vec2 pixel_screen = {
         pixel[0] / fb->cols,
@@ -374,81 +388,95 @@ bool ray_triangle_intersect(Ray *ray, vec3 v0, vec3 v1, vec3 v2, vec3 out_inter_
         return false;
 }
 
-bool cast_ray(Ray *ray, Mesh meshes[N_MESHES], vec3 out_hit, vec3 out_norm, Material **out_hit_mat)
+bool ray_sphere_intersect(Ray *ray, Sphere *sphere, vec3 out_inter, vec3 out_norm)
 {
-    list inter_pts;
-    list_init(&inter_pts, sizeof(vec3), 10);
+    vec3 a;
+    vec3_sub(a, ray->origin, sphere->center);
+    float b = vec3_mul_inner(a, ray->direction);
+    float c = vec3_mul_inner(a, a) - pow(sphere->radius, 2);
 
-    list mesh_idxs;
-    list_init(&mesh_idxs, sizeof(int), 10);
+    if (c > 0 && b > 0)
+        return false;
 
-    list vert_idxs;
-    list_init(&vert_idxs, sizeof(int), 10);
+    float d = b * b - c;
+    if (d < 0)
+        return false;
 
-    vec3 intersection;
-    for (int i = 0; i < N_MESHES; i++)
+    float t = (-b) - sqrt(d);
+    if (t < 0)
+        t = 0;
+
+    vec3 td;
+    vec3_scale(td, ray->direction, t);
+    vec3_add(out_inter, ray->origin, td);
+    vec3_sub(out_norm, out_inter, sphere->center);
+    vec3_norm(out_norm, out_norm);
+    return true;
+}
+
+
+bool cast_ray(Ray *ray, Scene *scene, vec3 out_hit, vec3 out_norm, Material **out_hit_mat)
+{
+    double closest_dist = DBL_MAX;
+    bool did_intersect = false;
+
+    // checking for intersections with meshes
+    for (int i = 0; i < scene->n_meshes; i++)
     {
-        for (int j = 0; j < meshes[i].size; j+=TRI_NPTS)
+        vec3 intersection;
+        for (int j = 0; j < scene->mesh_arr[i].size; j+=TRI_NPTS)
         {
-            bool ret = ray_triangle_intersect(ray, meshes[i].verts[j], meshes[i].verts[j+1], meshes[i].verts[j+2],
-                    intersection);
+            // i have no clue what i'm doing but i like the arrow
+            Mesh *mesh = &scene->mesh_arr[i];
+            bool ret = ray_triangle_intersect(
+                    ray, mesh->verts[j], mesh->verts[j+1], mesh->verts[j+2], intersection);
             if (ret)
             {
-                list_append(&inter_pts, intersection);
-                list_append(&mesh_idxs, &i);
-                list_append(&vert_idxs, &j);
+                double distance = square_dist(ray->origin, intersection);
+                if (distance < closest_dist)
+                {
+                    did_intersect = true;
+                    closest_dist = distance;
+                    memcpy(out_hit, intersection, sizeof(vec3));
+                    triangle_normal(out_norm, mesh->verts[j+2], mesh->verts[j+1], mesh->verts[j+0]);
+                    *out_hit_mat = &(mesh->material);
+                }
             }
         }
     }
 
-    if (inter_pts.used == 0)
+    // checking for intersections with spheres
+    for (int i = 0; i < scene->n_spheres; i++)
     {
-        list_free(&inter_pts);
-        list_free(&mesh_idxs);
-        list_free(&vert_idxs);
-        return false;
-    }
-
-    double closest_dist = DBL_MAX;
-    int closest_idx = -1;
-    for (int i = 0; i < inter_pts.used; i++)
-    {
-        vec3 *inter_pt = list_index(&inter_pts, i);
-        double dist = square_dist(ray->origin, *inter_pt);
-        if (dist < closest_dist)
+        vec3 intersection;
+        vec3 normal;
+        bool ret = ray_sphere_intersect(ray, &(scene->sphere_arr[i]), intersection, normal);
+        if (ret)
         {
-            closest_dist = dist;
-            closest_idx = i;
+            double distance = square_dist(ray->origin, intersection);
+            if (distance < closest_dist)
+            {
+                did_intersect = true;
+                closest_dist = distance;
+                memcpy(out_hit, intersection, sizeof(vec3));
+                memcpy(out_norm, normal, sizeof(vec3));
+                *out_hit_mat = &(scene->sphere_arr[i].material);
+            }
         }
     }
 
-    assert(closest_idx != -1);
+    if (did_intersect)
+    {
+        vec3 normal_small_scale;
+        vec3_scale(normal_small_scale, out_norm, RAY_BUMP_AMT);
+        vec3_add(out_hit, out_hit, normal_small_scale);
+    }
 
-    vec3 *closest_pt = list_index(&inter_pts, closest_idx);
-    int closest_mesh_idx = *((int *)list_index(&mesh_idxs, closest_idx));
-    int closest_vert_idx = *((int *)list_index(&vert_idxs, closest_idx));
-    Mesh *closest_mesh = &meshes[closest_mesh_idx];
-
-    triangle_normal(out_norm,
-                   (*closest_mesh).verts[closest_vert_idx + 2],
-                   (*closest_mesh).verts[closest_vert_idx + 1],
-                   (*closest_mesh).verts[closest_vert_idx + 0]);
-
-    memcpy(out_hit, *closest_pt, sizeof(vec3));
-    *out_hit_mat = &(closest_mesh->material);
-
-    // moving the hit point a small amount towards the vector to avoid a 2nd collision
-    vec3 normal_small_scale;
-    vec3_scale(normal_small_scale, out_norm, RAY_BUMP_AMT);
-    vec3_add(out_hit, out_hit, normal_small_scale);
-
-    list_free(&inter_pts);
-    list_free(&mesh_idxs);
-    list_free(&vert_idxs);
-    return true;
+    return did_intersect;
 }
 
-void trace_path(fcolor_t out_color, Ray *ray, unsigned int depth, Mesh meshes[N_MESHES])
+
+void trace_path(fcolor_t out_color, Ray *ray, unsigned int depth, Scene *scene)
 {
     memset(out_color, 0, sizeof(fcolor_t));
 
@@ -458,7 +486,7 @@ void trace_path(fcolor_t out_color, Ray *ray, unsigned int depth, Mesh meshes[N_
     vec3 ray_hit_pt;
     vec3 ray_hit_norm;
     Material *ray_hit_mat;
-    bool ray_hit = cast_ray(ray, meshes, ray_hit_pt, ray_hit_norm, &ray_hit_mat);
+    bool ray_hit = cast_ray(ray, scene, ray_hit_pt, ray_hit_norm, &ray_hit_mat);
     if (!ray_hit)
         return;
 
@@ -467,7 +495,7 @@ void trace_path(fcolor_t out_color, Ray *ray, unsigned int depth, Mesh meshes[N_
     cosine_sample_hemisphere(new_ray.direction, ray_hit_norm);
 
     fcolor_t incoming;
-    trace_path(incoming, &new_ray, depth + 1, meshes);
+    trace_path(incoming, &new_ray, depth + 1, scene);
 
     // https://i.redd.it/802mndge03t01.png
     // https://computergraphics.stackexchange.com/questions/8578/how-to-set-equivalent-pdfs-for-cosine-weighted-and-uniform-sampled-hemispheres
