@@ -26,11 +26,11 @@
 #define CAM_X 0
 #define CAM_Y 0
 #define CAM_Z 0
-#define ROWS 100
-#define COLS 100
+#define ROWS 256
+#define COLS 256
 #define MAX_DEPTH 8
-#define N_SAMPLES 500
-#define DOF_SAMPLES 10
+#define N_SAMPLES 200
+#define DOF_SAMPLES 3
 #define FOV_RAD (1.0472)
 #define RAY_BUMP_AMT (0.001)
 #define FOCAL_LENGTH (0.7)
@@ -101,6 +101,7 @@ bool ray_triangle_intersect(Ray *ray, vec3 v0, vec3 v1, vec3 v2, vec3 out_inter_
 bool ray_sphere_intersect(Ray *ray, Sphere *sphere, vec3 out_inter, vec3 out_norm);
 bool cast_ray(Ray *ray, Scene *scene, vec3 out_hit, vec3 out_norm, Material **out_hit_mat);
 void trace_path(fcolor_t out_color, Ray *ray, unsigned int depth, Scene *scene);
+void render(Framebuffer *fb, Scene *scene);
 void read_meshes(Mesh out_mesh_arr[N_MESHES], const char *mesh_list_path);
 void free_meshes(Mesh mesh_arr[N_MESHES]);
 
@@ -147,60 +148,10 @@ int main(void)
     const int fb_size = fb.rows * fb.cols;
     fb.buffer = calloc(fb_size, sizeof(fcolor_t));
 
-    omp_lock_t writelock;
-    omp_init_lock(&writelock);
-
-    time_t begin = time(NULL);
     srandom(time(NULL));
 
-    int loop_count = 0;
-    #pragma omp parallel for schedule(dynamic)
-    for (int i = 0; i < fb.rows; i++)
-    {
-        for (int j = 0; j < fb.cols; j++)
-        {
-            fcolor_t color_avg = {0, 0, 0};
-            for (int k = 0; k < N_SAMPLES; k++)
-            {
-                vec2 pixel = {j, i};
-                fcolor_t out_color = {0};
-
-                // pure stochastic sampling works better than my grid sampling technique ;-;
-                vec2 pix_sample_offset = {frand(0,1),frand(0,1)};
-
-                pixel[0] += pix_sample_offset[0];
-                pixel[1] += pix_sample_offset[1];
-
-                Ray dof_rays[DOF_SAMPLES];
-                gen_camera_rays_dof(pixel, &fb, DOF_SAMPLES, FOCAL_LENGTH, APERTURE, dof_rays);
-                for (int l = 0; l < DOF_SAMPLES; l++)
-                {
-                    fcolor_t dof_color;
-                    trace_path(dof_color, &(dof_rays[l]), 0, &scene);
-                    fcolor_add(out_color, out_color, dof_color);
-                }
-                fcolor_scale_inv(out_color, out_color, DOF_SAMPLES);
-
-                fcolor_add(color_avg, color_avg, out_color);
-            }
-
-            fcolor_scale_inv(color_avg, color_avg, N_SAMPLES);
-
-            for (int i = 0; i < COL_NCHANNELS; i++)
-            {
-                color_avg[i] = CLAMP(pow(color_avg[i], 1/2.2), 0.f, 1.f) * 255;
-            }
-
-            const int buf_idx = coord_to_idx(j, i, fb.rows, fb.cols);
-            memcpy(fb.buffer[buf_idx], color_avg, sizeof(fcolor_t));
-
-            omp_set_lock(&writelock);
-            print_progress("Rendering... ", 50, loop_count++, fb_size);
-            omp_unset_lock(&writelock);
-        }
-    }
-    omp_destroy_lock(&writelock);
-
+    time_t begin = time(NULL);
+    render(&fb, &scene);
     time_t end = time(NULL);
     printf("\nTime elapsed: %zu seconds.\n", (end - begin));
 
@@ -214,7 +165,10 @@ int main(void)
     }
 
     if (fork() == 0)
+    {
         execl("/bin/cp", "cp", "./out.png", "./out_bak.png", (char*)0);
+        exit(EXIT_SUCCESS);
+    }
     else
         wait(NULL);
 
@@ -342,7 +296,7 @@ void gen_camera_rays_dof(vec2 pixel, Framebuffer *fb,
     vec3 dir_scaled;
     vec3_scale(dir_scaled, out_rays[0].direction, focal_length);
     vec3_add(converge_pt, *orig_origin, dir_scaled);
-    for (int i = 0; i < n_samples - 1; i++)
+    for (int i = 1; i < n_samples - 1; i++)
     {
         vec3 ray_offset = {frand(-aperture, aperture), frand(-aperture, aperture), 0};
         vec3_add(out_rays[i].origin, *orig_origin, ray_offset);
@@ -554,6 +508,61 @@ void trace_path(fcolor_t out_color, Ray *ray, unsigned int depth, Scene *scene)
     }
 }
 
+void render(Framebuffer *fb, Scene *scene)
+{
+    const int fb_size = fb->rows * fb->cols;
+
+    omp_lock_t writelock;
+    omp_init_lock(&writelock);
+
+    int loop_count = 0;
+    #pragma omp parallel for schedule(dynamic)
+    for (int i = 0; i < fb->rows; i++)
+    {
+        for (int j = 0; j < fb->cols; j++)
+        {
+            fcolor_t color_avg = {0, 0, 0};
+            for (int k = 0; k < N_SAMPLES; k++)
+            {
+                vec2 pixel = {j, i};
+                fcolor_t out_color = {0};
+
+                // pure stochastic sampling works better than my grid sampling technique ;-;
+                vec2 pix_sample_offset = {frand(0,1),frand(0,1)};
+
+                pixel[0] += pix_sample_offset[0];
+                pixel[1] += pix_sample_offset[1];
+
+                Ray dof_rays[DOF_SAMPLES];
+                gen_camera_rays_dof(pixel, fb, DOF_SAMPLES, FOCAL_LENGTH, APERTURE, dof_rays);
+                for (int l = 0; l < DOF_SAMPLES; l++)
+                {
+                    fcolor_t dof_color;
+                    trace_path(dof_color, &(dof_rays[l]), 0, scene);
+                    fcolor_add(out_color, out_color, dof_color);
+                }
+                fcolor_scale_inv(out_color, out_color, DOF_SAMPLES);
+
+                fcolor_add(color_avg, color_avg, out_color);
+            }
+
+            fcolor_scale_inv(color_avg, color_avg, N_SAMPLES);
+
+            for (int i = 0; i < COL_NCHANNELS; i++)
+            {
+                color_avg[i] = CLAMP(pow(color_avg[i], 1/2.2), 0.f, 1.f) * 255;
+            }
+
+            const int buf_idx = coord_to_idx(j, i, fb->rows, fb->cols);
+            memcpy(fb->buffer[buf_idx], color_avg, sizeof(fcolor_t));
+
+            omp_set_lock(&writelock);
+            print_progress("Rendering... ", 50, loop_count++, fb_size);
+            omp_unset_lock(&writelock);
+        }
+    }
+    omp_destroy_lock(&writelock);
+}
 
 void read_meshes(Mesh out_mesh_arr[N_MESHES], const char *mesh_list_path)
 {
