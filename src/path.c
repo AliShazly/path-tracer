@@ -22,15 +22,20 @@
 #define MAX_LINE_SIZE 256
 #define TRI_NPTS 3
 #define N_MESHES 8
-#define FOV_RAD (1.0472)
-#define RAY_BUMP_AMT (0.001)
-#define ROWS 128
-#define COLS 128
-#define MAX_DEPTH 12
-#define N_SAMPLES 100
+
 #define CAM_X 0
 #define CAM_Y 0
 #define CAM_Z 0
+#define ROWS 100
+#define COLS 100
+#define MAX_DEPTH 8
+#define N_SAMPLES 500
+#define DOF_SAMPLES 10
+#define FOV_RAD (1.0472)
+#define RAY_BUMP_AMT (0.001)
+#define FOCAL_LENGTH (0.7)
+#define APERTURE (0.04)
+#define SUBPIX_RAND_OFFSET (.25)
 
 #define CLAMP(val, min, max) (val < min ? min : (val > max ? max : val))
 
@@ -84,11 +89,13 @@ bool almost_equal(double a, double b, double eps);
 double frand(double low,double high);
 double distance(vec3 a, vec3 b);
 double square_dist(vec3 a, vec3 b);
-void uniform_sample(vec2 out_offset, int n_samples, int sample_iter);
+void rand_grid_sample(vec2 out_offset, int n_samples, int sample_iter);
 void triangle_normal(vec3 dst, vec3 a, vec3 b, vec3 c);
 bool point_in_circle(vec2 pt, vec2 center, int radius);
 void reinhard_cmap(fcolor_t ret, fcolor_t c);
-void gen_camera_ray(Ray *ret, vec2 pixel, const Framebuffer *fb);
+void gen_camera_ray(Ray *ret, vec2 pixel, Framebuffer *fb);
+void gen_camera_rays_dof(vec2 pixel, Framebuffer *fb,
+        int n_samples, double focal_length, double aperture, Ray out_rays[n_samples]);
 void cosine_sample_hemisphere(vec3 ret, vec3 normal);
 bool ray_triangle_intersect(Ray *ray, vec3 v0, vec3 v1, vec3 v2, vec3 out_inter_pt);
 bool ray_sphere_intersect(Ray *ray, Sphere *sphere, vec3 out_inter, vec3 out_norm);
@@ -110,13 +117,11 @@ int main(void)
     Material white_mat = {.emittance = 0};
     Material green_mat  = {.emittance = 0};
     Material red_mat  = {.emittance = 0};
-    Material light_mat = {.emittance = 100};
-    Material less_light_mat = {.emittance = 10};
+    Material light_mat = {.emittance = 25};
     memcpy(red_mat.color, red, sizeof(fcolor_t));
     memcpy(green_mat.color, green, sizeof(fcolor_t));
     memcpy(white_mat.color, white, sizeof(fcolor_t));
     memcpy(light_mat.color, lgt_color, sizeof(fcolor_t));
-    memcpy(less_light_mat.color, lgt_color, sizeof(fcolor_t));
 
     // ordering is determined in ./objs.txt
     cornell_meshes[0].material = red_mat;
@@ -130,7 +135,7 @@ int main(void)
 
     const int n_spheres = 1;
     Sphere sphere_arr[n_spheres] = {
-        {.center = {0,0,-0.72}, .radius = 0.08, .material=less_light_mat}
+        {.center = {0,0,-0.7}, .radius = 0.08, .material=white_mat}
     };
 
     Scene scene = {.n_meshes = N_MESHES, .mesh_arr = cornell_meshes,
@@ -158,17 +163,23 @@ int main(void)
             for (int k = 0; k < N_SAMPLES; k++)
             {
                 vec2 pixel = {j, i};
-                vec2 pix_sample_offset;
-                fcolor_t out_color;
+                fcolor_t out_color = {0};
 
-                uniform_sample(pix_sample_offset, N_SAMPLES, k);
+                // pure stochastic sampling works better than my grid sampling technique ;-;
+                vec2 pix_sample_offset = {frand(0,1),frand(0,1)};
 
                 pixel[0] += pix_sample_offset[0];
                 pixel[1] += pix_sample_offset[1];
 
-                Ray ray;
-                gen_camera_ray(&ray, pixel, &fb);
-                trace_path(out_color, &ray, 0, &scene);
+                Ray dof_rays[DOF_SAMPLES];
+                gen_camera_rays_dof(pixel, &fb, DOF_SAMPLES, FOCAL_LENGTH, APERTURE, dof_rays);
+                for (int l = 0; l < DOF_SAMPLES; l++)
+                {
+                    fcolor_t dof_color;
+                    trace_path(dof_color, &(dof_rays[l]), 0, &scene);
+                    fcolor_add(out_color, out_color, dof_color);
+                }
+                fcolor_scale_inv(out_color, out_color, DOF_SAMPLES);
 
                 fcolor_add(color_avg, color_avg, out_color);
             }
@@ -177,7 +188,6 @@ int main(void)
 
             for (int i = 0; i < COL_NCHANNELS; i++)
             {
-                // sqrt is an approx of pow(x, (1 / 2.2)) for gamma correcting
                 color_avg[i] = CLAMP(pow(color_avg[i], 1/2.2), 0.f, 1.f) * 255;
             }
 
@@ -268,11 +278,13 @@ double square_dist(vec3 a, vec3 b)
     return pow(b[0] - a[0], 2) + pow(b[1] - a[1], 2) + pow(b[2] - a[2], 2);
 }
 
-void uniform_sample(vec2 out_offset, int n_samples, int sample_iter)
+void rand_grid_sample(vec2 out_offset, int n_samples, int sample_iter)
 {
     const double step = 1. / n_samples;
-    out_offset[0] = step * ((sample_iter % n_samples) + 1);
-    out_offset[1] = step * (floor(sample_iter /(double) n_samples) + 1);
+    out_offset[0] = (step * ((sample_iter % n_samples) + 1));
+    out_offset[1] = (step * (floor(sample_iter /(double) n_samples) + 1));
+    out_offset[0] += frand(-SUBPIX_RAND_OFFSET, SUBPIX_RAND_OFFSET);
+    out_offset[1] += frand(-SUBPIX_RAND_OFFSET, SUBPIX_RAND_OFFSET);
 }
 
 void triangle_normal(vec3 dst, vec3 a, vec3 b, vec3 c)
@@ -299,7 +311,7 @@ void reinhard_cmap(fcolor_t ret, fcolor_t c)
 }
 
 // switch rows/cols for a fb index as a pixel, and you're in raster space
-void gen_camera_ray(Ray *ret, vec2 pixel, const Framebuffer *fb)
+void gen_camera_ray(Ray *ret, vec2 pixel, Framebuffer *fb)
 {
     const double image_aspect = fb->rows / (double) fb->cols;
 
@@ -316,6 +328,27 @@ void gen_camera_ray(Ray *ret, vec2 pixel, const Framebuffer *fb)
     ret->direction[1] = (1 - 2 * pixel_screen[1]) * image_aspect * t;
     ret->direction[2] = -1;
     vec3_norm(ret->direction, ret->direction);
+}
+
+void gen_camera_rays_dof(vec2 pixel, Framebuffer *fb,
+        int n_samples, double focal_length, double aperture, Ray out_rays[n_samples])
+{
+    assert(n_samples > 0);
+
+    gen_camera_ray(&(out_rays[0]), pixel, fb);
+    vec3 *orig_origin = &(out_rays[0].origin);
+
+    vec3 converge_pt;
+    vec3 dir_scaled;
+    vec3_scale(dir_scaled, out_rays[0].direction, focal_length);
+    vec3_add(converge_pt, *orig_origin, dir_scaled);
+    for (int i = 0; i < n_samples - 1; i++)
+    {
+        vec3 ray_offset = {frand(-aperture, aperture), frand(-aperture, aperture), 0};
+        vec3_add(out_rays[i].origin, *orig_origin, ray_offset);
+        vec3_sub(out_rays[i].direction, converge_pt, out_rays[i].origin);
+        vec3_norm(out_rays[i].direction, out_rays[i].direction);
+    }
 }
 
 // http://www.kevinbeason.com/smallpt/
@@ -517,7 +550,7 @@ void trace_path(fcolor_t out_color, Ray *ray, unsigned int depth, Scene *scene)
         const double emit = color * emitted_light;
         const double inc =  color * incoming[i];
 
-        out_color[i] = emit + inc / pdf;
+        out_color[i] = (emit + inc) / pdf;
     }
 }
 
