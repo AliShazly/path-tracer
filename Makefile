@@ -8,8 +8,8 @@ OBJ 	:= $(patsubst $(SRC_DIR)/%.c, $(OBJ_DIR)/%.o, $(SRC))
 CC       = clang
 CFLAGS   = -Wall -g -Iinclude -fopenmp
 OPTFLAGS = -O3
-LDFLAGS  = -lm -fopenmp
-LDLIBS   =
+LDFLAGS  = -lm -fopenmp -lGL -lX11
+LDLIBS   = -lminifb
 
 .PHONY: all clean opt
 

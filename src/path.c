@@ -1,7 +1,10 @@
+#include "path.h"
 #include "linmath_d.h"
 #include "obj_parser.h"
 #include "color.h"
+#include "display.h"
 
+#include <sys/mman.h>
 #include <stdio.h>
 #include <assert.h>
 #include <stdlib.h>
@@ -16,9 +19,6 @@
 #include <fcntl.h>
 #include <omp.h>
 
-#define STB_IMAGE_WRITE_IMPLEMENTATION
-#include "stb_image_write.h"
-
 #define MAX_LINE_SIZE 256
 #define TRI_NPTS 3
 #define N_MESHES 8
@@ -26,10 +26,10 @@
 #define CAM_X 0
 #define CAM_Y 0
 #define CAM_Z 0
-#define ROWS 256
-#define COLS 256
+#define ROWS 50
+#define COLS 50
 #define MAX_DEPTH 8
-#define N_SAMPLES 200
+#define N_SAMPLES 50
 #define DOF_SAMPLES 3
 #define FOV_RAD (1.0472)
 #define RAY_BUMP_AMT (0.001)
@@ -73,15 +73,11 @@ typedef struct
     size_t n_spheres;
     Mesh *mesh_arr;
     Sphere *sphere_arr;
+    vec3 camera_pos;
 }Scene;
 
-typedef struct
-{
-    size_t rows;
-    size_t cols;
-    fcolor_t *buffer;
-}Framebuffer;
 
+void do_nothing();
 void print_progress(char* msg, int len, float current, float max);
 void print_col(fcolor_t c);
 int coord_to_idx(int x, int y, int rows, int cols);
@@ -93,8 +89,9 @@ void rand_grid_sample(vec2 out_offset, int n_samples, int sample_iter);
 void triangle_normal(vec3 dst, vec3 a, vec3 b, vec3 c);
 bool point_in_circle(vec2 pt, vec2 center, int radius);
 void reinhard_cmap(fcolor_t ret, fcolor_t c);
-void gen_camera_ray(Ray *ret, vec2 pixel, Framebuffer *fb);
-void gen_camera_rays_dof(vec2 pixel, Framebuffer *fb,
+void clear_framebuffer(Framebuffer *fb);
+void gen_camera_ray(Ray *ret, vec2 pixel, vec3 cam_pos, Framebuffer *fb);
+void gen_camera_rays_dof(vec2 pixel, vec3 cam_pos, Framebuffer *fb,
         int n_samples, double focal_length, double aperture, Ray out_rays[n_samples]);
 void cosine_sample_hemisphere(vec3 ret, vec3 normal);
 bool ray_triangle_intersect(Ray *ray, vec3 v0, vec3 v1, vec3 v2, vec3 out_inter_pt);
@@ -104,9 +101,12 @@ void trace_path(fcolor_t out_color, Ray *ray, unsigned int depth, Scene *scene);
 void render(Framebuffer *fb, Scene *scene);
 void read_meshes(Mesh out_mesh_arr[N_MESHES], const char *mesh_list_path);
 void free_meshes(Mesh mesh_arr[N_MESHES]);
+bool handle_input(Scene *scene, char keypress);
 
 int main(void)
 {
+    srandom(time(NULL));
+
     Mesh *cornell_meshes = malloc(sizeof(Mesh) * N_MESHES);
     read_meshes(cornell_meshes, "./objs.txt");
 
@@ -140,45 +140,88 @@ int main(void)
     };
 
     Scene scene = {.n_meshes = N_MESHES, .mesh_arr = cornell_meshes,
-        .n_spheres = n_spheres, .sphere_arr=sphere_arr};
+        .n_spheres = n_spheres, .sphere_arr=sphere_arr, .camera_pos = {CAM_X, CAM_Y, CAM_Z}};
 
     Framebuffer fb;
     fb.rows = ROWS;
     fb.cols = COLS;
-    const int fb_size = fb.rows * fb.cols;
-    fb.buffer = calloc(fb_size, sizeof(fcolor_t));
+    const size_t fb_alloc_size = fb.rows * fb.cols * sizeof(*fb.buffer);
+    fb.buffer = mmap(NULL, fb_alloc_size,
+            PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 
-    srandom(time(NULL));
+    // catching signals from display process
+    // SIGUSR1 - camera position has changed through user input
+    // SIGCHLD - display/render process has terminated
+    sigset_t sigset;
+    sigemptyset(&sigset);
+    sigaddset(&sigset, SIGUSR1);
+    sigaddset(&sigset, SIGCHLD);
+    signal(SIGCHLD, do_nothing);
+    signal(SIGUSR1, do_nothing);
 
-    time_t begin = time(NULL);
-    render(&fb, &scene);
-    time_t end = time(NULL);
-    printf("\nTime elapsed: %zu seconds.\n", (end - begin));
+    pid_t parent_pid = getpid();
 
-    color_t *write_buf = malloc(fb.rows * fb.cols * sizeof(color_t));
-    for (int i = 0; i < fb.rows * fb.cols; i++)
+    // pipe used to pass user input
+    int pipe_fds[2];
+    pipe(pipe_fds);
+
+    pid_t display_process = fork();
+    if (display_process == 0)
     {
-        for (int j = 0; j < COL_NCHANNELS; j++)
-        {
-            write_buf[i][j] = (uint8_t)(fb.buffer[i][j]);
-        }
-    }
-
-    if (fork() == 0)
-    {
-        execl("/bin/cp", "cp", "./out.png", "./out_bak.png", (char*)0);
+        display_buffer(&fb, parent_pid, pipe_fds[1]);
         exit(EXIT_SUCCESS);
     }
-    else
-        wait(NULL);
 
-    const int png_stride = fb.cols * sizeof(write_buf[0]);
-    stbi_write_jpg("./out.png",fb.cols,fb.rows,COL_NCHANNELS,write_buf, png_stride);
+    bool finished = false;
+    // main render loop
+    while(!finished)
+    {
+        pid_t render_process = fork();
+        if (render_process == 0)
+        {
+            time_t begin = time(NULL);
+            render(&fb, &scene);
+            time_t end = time(NULL);
+            printf("\nTime elapsed: %zu seconds.\n", (end - begin));
+            exit(EXIT_SUCCESS);
+        }
 
+        // signal handling loop
+        for (;;)
+        {
+            int sig;
+            char keypress;
+            sigwait(&sigset, &sig);
+            if (sig == SIGCHLD)
+            {
+                // display has terminated
+                if (waitpid(display_process, NULL, WNOHANG) != 0)
+                {
+                    finished = true;
+                    break;
+                }
+            }
+            else if (sig ==  SIGUSR1)
+            {
+                read(pipe_fds[0], &keypress, sizeof(char));
+                if (handle_input(&scene, keypress))
+                {
+                    clear_framebuffer(&fb);
+                    break;
+                }
+            }
+        }
+
+        kill(render_process, SIGTERM);
+        waitpid(render_process, NULL, 0);
+    }
+    waitpid(display_process, NULL, 0);
     free_meshes(cornell_meshes);
-    free(fb.buffer);
-    free(write_buf);
+    munmap(fb.buffer, fb_alloc_size);
 }
+
+//TODO: simplify implementation
+void do_nothing(){}
 
 void print_progress(char* msg, int len, float current, float max)
 {
@@ -264,8 +307,13 @@ void reinhard_cmap(fcolor_t ret, fcolor_t c)
     fcolor_divide(ret, c, t);
 }
 
+void clear_framebuffer(Framebuffer *fb)
+{
+    memset(fb->buffer, 0, sizeof(*fb->buffer) * fb->rows * fb->cols);
+}
+
 // switch rows/cols for a fb index as a pixel, and you're in raster space
-void gen_camera_ray(Ray *ret, vec2 pixel, Framebuffer *fb)
+void gen_camera_ray(Ray *ret, vec2 pixel, vec3 cam_pos, Framebuffer *fb)
 {
     const double image_aspect = fb->rows / (double) fb->cols;
 
@@ -275,28 +323,26 @@ void gen_camera_ray(Ray *ret, vec2 pixel, Framebuffer *fb)
     };
 
     const double t = tan(FOV_RAD / 2);
-    ret->origin[0] = CAM_X;
-    ret->origin[1] = CAM_Y;
-    ret->origin[2] = CAM_Z;
+    memcpy(ret->origin, cam_pos, sizeof(vec3));
     ret->direction[0] = (2 * pixel_screen[0] - 1) * t;
     ret->direction[1] = (1 - 2 * pixel_screen[1]) * image_aspect * t;
     ret->direction[2] = -1;
     vec3_norm(ret->direction, ret->direction);
 }
 
-void gen_camera_rays_dof(vec2 pixel, Framebuffer *fb,
+void gen_camera_rays_dof(vec2 pixel, vec3 cam_pos, Framebuffer *fb,
         int n_samples, double focal_length, double aperture, Ray out_rays[n_samples])
 {
     assert(n_samples > 0);
 
-    gen_camera_ray(&(out_rays[0]), pixel, fb);
+    gen_camera_ray(&(out_rays[0]), pixel, cam_pos, fb);
     vec3 *orig_origin = &(out_rays[0].origin);
 
     vec3 converge_pt;
     vec3 dir_scaled;
     vec3_scale(dir_scaled, out_rays[0].direction, focal_length);
     vec3_add(converge_pt, *orig_origin, dir_scaled);
-    for (int i = 1; i < n_samples - 1; i++)
+    for (int i = 1; i < n_samples; i++)
     {
         vec3 ray_offset = {frand(-aperture, aperture), frand(-aperture, aperture), 0};
         vec3_add(out_rays[i].origin, *orig_origin, ray_offset);
@@ -512,8 +558,8 @@ void render(Framebuffer *fb, Scene *scene)
 {
     const int fb_size = fb->rows * fb->cols;
 
-    omp_lock_t writelock;
-    omp_init_lock(&writelock);
+    omp_lock_t mutex;
+    omp_init_lock(&mutex);
 
     int loop_count = 0;
     #pragma omp parallel for schedule(dynamic)
@@ -534,11 +580,13 @@ void render(Framebuffer *fb, Scene *scene)
                 pixel[1] += pix_sample_offset[1];
 
                 Ray dof_rays[DOF_SAMPLES];
-                gen_camera_rays_dof(pixel, fb, DOF_SAMPLES, FOCAL_LENGTH, APERTURE, dof_rays);
+                gen_camera_rays_dof(pixel, scene->camera_pos, fb,
+                        DOF_SAMPLES, FOCAL_LENGTH, APERTURE, dof_rays);
+
                 for (int l = 0; l < DOF_SAMPLES; l++)
                 {
                     fcolor_t dof_color;
-                    trace_path(dof_color, &(dof_rays[l]), 0, scene);
+                    trace_path(dof_color, &dof_rays[l], 0, scene);
                     fcolor_add(out_color, out_color, dof_color);
                 }
                 fcolor_scale_inv(out_color, out_color, DOF_SAMPLES);
@@ -556,12 +604,12 @@ void render(Framebuffer *fb, Scene *scene)
             const int buf_idx = coord_to_idx(j, i, fb->rows, fb->cols);
             memcpy(fb->buffer[buf_idx], color_avg, sizeof(fcolor_t));
 
-            omp_set_lock(&writelock);
+            omp_set_lock(&mutex);
             print_progress("Rendering... ", 50, loop_count++, fb_size);
-            omp_unset_lock(&writelock);
+            omp_unset_lock(&mutex);
         }
     }
-    omp_destroy_lock(&writelock);
+    omp_destroy_lock(&mutex);
 }
 
 void read_meshes(Mesh out_mesh_arr[N_MESHES], const char *mesh_list_path)
@@ -596,3 +644,46 @@ void free_meshes(Mesh mesh_arr[N_MESHES])
     }
     free(mesh_arr);
 }
+
+bool handle_input(Scene *scene, char keypress)
+{
+    const double step = 0.1;
+
+    bool ret = true;
+    vec3 offset = {0};
+
+    switch(keypress)
+    {
+        case 'w':
+            offset[2] = -step;
+            break;
+
+        case 'a':
+            offset[0] = -step;
+            break;
+
+        case 's':
+            offset[2] = step;
+            break;
+
+        case 'd':
+            offset[0] = step;
+            break;
+
+        case 'q':
+            offset[1] = -step;
+            break;
+
+        case 'e':
+            offset[1] = step;
+            break;
+
+        default:
+            ret = false;
+    }
+
+    vec3_add(scene->camera_pos, scene->camera_pos, offset);
+    return ret;
+}
+
+
